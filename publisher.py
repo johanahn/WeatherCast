@@ -6,7 +6,7 @@ import sys
 import time
 
 from client_base import BrokerClient
-from common import ALERT_LEVELS, HOST, LOCATIONS, PORT, format_alert, setup_console
+from common import ALERT_LEVELS, HOST, PORT, format_alert, setup_console
 
 BANNER = "=" * 40
 SAMPLES = [
@@ -44,7 +44,7 @@ def simulate(client, interval):
     print(f"Simulation mode: publishing a random update every {interval}s (Ctrl+C to stop)")
     while True:
         cond, level, msg = random.choice(SAMPLES)
-        r = client.request({"cmd": "publish", "location": random.choice(LOCATIONS),
+        r = client.request({"cmd": "publish", "location": random.choice(client.locations),
                             "condition": cond, "temperature": random.randint(24, 35),
                             "alert_level": level, "message": msg})
         report(r)
@@ -55,7 +55,7 @@ def main():
     setup_console()
     p = argparse.ArgumentParser(description="WeatherCast publisher")
     p.add_argument("--name", default="Publisher")
-    p.add_argument("--host", default=HOST)
+    p.add_argument("--host", default=HOST, help="broker IP/hostname")
     p.add_argument("--port", type=int, default=PORT)
     p.add_argument("--simulate", type=int, metavar="SECONDS")
     a = p.parse_args()
@@ -75,12 +75,17 @@ def main():
         print("[1] Publish Weather Update\n[2] View Published Updates\n[3] Exit")
         choice = input("\nEnter choice: ").strip()
         if choice == "1":
-            loc = pick("Select Location:", LOCATIONS)
+            loc = pick("Select Location:", client.locations)
             if not loc:
                 print("Invalid selection.")
                 continue
             cond = input("\nWeather Condition: ").strip()
             temp = input("Temperature (C): ").strip()
+            try:
+                float(temp)
+            except ValueError:
+                print("Temperature must be a number.")
+                continue
             level = pick("Alert Level:", ALERT_LEVELS)
             if not level:
                 print("Invalid selection.")

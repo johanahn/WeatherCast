@@ -4,16 +4,22 @@
 Thread-per-connection TCP server. Subscriptions, messages and per-subscriber
 delivery state are persisted in SQLite so that offline subscribers can
 retrieve missed alerts and the broker itself can crash and restart safely.
+
+Delivery is acknowledged: an alert counts as delivered only after the
+subscriber's client sends {"cmd": "ack", "id": <message id>}.
 """
 import argparse
+import hmac
 import re
 import socket
 import sqlite3
 import threading
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 
-from common import (HEARTBEAT_TIMEOUT, HOST, LOCATIONS, PORT, LineSocket,
-                    setup_console)
+from common import (ALERT_LEVELS, AUTH_TOKEN, BIND_HOST, HEARTBEAT_TIMEOUT,
+                    LOCATIONS, PORT, RETENTION_DAYS, LineSocket,
+                    enable_keepalive, setup_console)
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_\- ]{1,32}$")
 SCHEMA = """
@@ -76,6 +82,32 @@ class Broker:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self.db.commit()
+        self.prune()
+        threading.Thread(target=self._prune_loop, daemon=True).start()
+
+    # ------------------------------------------------------- maintenance --
+    def prune(self):
+        cutoff = (datetime.now() - timedelta(days=RETENTION_DAYS)
+                  ).strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            try:
+                self.db.execute(
+                    "DELETE FROM deliveries WHERE message_id IN "
+                    "(SELECT id FROM messages WHERE created_at < ?)", (cutoff,))
+                cur = self.db.execute("DELETE FROM messages WHERE created_at < ?",
+                                      (cutoff,))
+                self.db.commit()
+                if cur.rowcount:
+                    log(f"Pruned {cur.rowcount} alert(s) older than "
+                        f"{RETENTION_DAYS} days")
+            except sqlite3.Error as exc:
+                self.db.rollback()
+                log(f"Prune failed: {exc}")
+
+    def _prune_loop(self):
+        while True:
+            time.sleep(3600)
+            self.prune()
 
     # ------------------------------------------------------------ server --
     def serve_forever(self):
@@ -84,7 +116,9 @@ class Broker:
         srv.bind((self.host, self.port))
         srv.listen(50)
         srv.settimeout(1.0)  # lets Ctrl+C work on Windows too
-        log(f"Broker listening on {self.host}:{self.port}")
+        log(f"Broker listening on {self.host}:{self.port}"
+            + ("" if AUTH_TOKEN else "  (WARNING: no WEATHERCAST_TOKEN set, "
+                                    "anyone can connect)"))
         try:
             while True:
                 try:
@@ -100,6 +134,7 @@ class Broker:
 
     def handle(self, conn, addr):
         conn.settimeout(HEARTBEAT_TIMEOUT)   # clients ping more often than this
+        enable_keepalive(conn)
         ls = LineSocket(conn)
         session = None
         try:
@@ -114,6 +149,10 @@ class Broker:
                 self._dispatch(session, msg)
         except OSError as exc:
             log(f"Connection error {addr}: {exc!r}")
+        except sqlite3.Error as exc:
+            with self.lock:
+                self.db.rollback()
+            log(f"DB error for {addr}: {exc}")
         finally:
             self._unregister(session, ls)
 
@@ -123,6 +162,12 @@ class Broker:
             ls.send(err("Expected hello"))
             ls.close()
             return None
+        if AUTH_TOKEN and not hmac.compare_digest(
+                str(hello.get("token", "")).encode(), AUTH_TOKEN.encode()):
+            ls.send(err("Authentication failed"))
+            ls.close()
+            log(f"Rejected {addr}: bad token")
+            return None
         role, name = hello.get("role"), str(hello.get("name", "")).strip()
         if role not in ("subscriber", "publisher") or not NAME_RE.match(name):
             ls.send(err("Invalid role or name (1-32 letters, digits, _ - space)"))
@@ -130,31 +175,32 @@ class Broker:
             return None
         session = Session(ls, role, name, addr)
         if role == "publisher":
-            ls.send(ok(info="connected"))
+            ls.send(ok(info="connected", locations=LOCATIONS))
             log(f"Publisher '{name}' connected from {addr}")
             return session
+
         with self.lock:
             old = self.online.get(name)
-            if old:
-                old.send({"type": "kicked",
-                          "reason": "Logged in from another terminal"})
-                old.close()
             self.online[name] = session
             self.db.execute(
                 "INSERT INTO subscribers VALUES(?,?,?) ON CONFLICT(username) "
                 "DO UPDATE SET last_seen=excluded.last_seen", (name, now(), now()))
+            self.db.commit()
             rows = self.db.execute(
                 "SELECT m.* FROM deliveries d JOIN messages m ON m.id=d.message_id "
                 "WHERE d.username=? AND d.delivered=0 ORDER BY m.id", (name,)
             ).fetchall()
-            ls.send(ok(info="connected", missed=len(rows)))
-            for row in rows:
-                if not session.send(push_from_row(row, missed=True)):
-                    break
-                self.db.execute(
-                    "UPDATE deliveries SET delivered=1, delivered_at=? "
-                    "WHERE username=? AND message_id=?", (now(), name, row["id"]))
-            self.db.commit()
+            # Sent under the lock so no live push can arrive before the ack.
+            ls.send(ok(info="connected", locations=LOCATIONS, missed=len(rows)))
+
+        # Network I/O below happens OUTSIDE the lock.
+        if old:
+            old.send({"type": "kicked", "reason": "Logged in from another terminal"})
+            old.close()
+        # Replayed alerts are marked delivered only when the client acks them.
+        for row in rows:
+            if not session.send(push_from_row(row, missed=True)):
+                break
         log(f"Subscriber '{name}' connected from {addr} "
             f"({len(rows)} missed alert(s) replayed)")
         return session
@@ -164,11 +210,15 @@ class Broker:
         if session is None:
             return
         with self.lock:
-            if self.online.get(session.name) is session and session.role == "subscriber":
+            if session.role == "subscriber" and self.online.get(session.name) is session:
                 del self.online[session.name]
-                self.db.execute("UPDATE subscribers SET last_seen=? WHERE username=?",
-                                (now(), session.name))
-                self.db.commit()
+                try:
+                    self.db.execute("UPDATE subscribers SET last_seen=? WHERE username=?",
+                                    (now(), session.name))
+                    self.db.commit()
+                except sqlite3.Error as exc:
+                    self.db.rollback()
+                    log(f"DB error on unregister: {exc}")
         log(f"{session.role.capitalize()} '{session.name}' disconnected")
 
     # ----------------------------------------------------------- commands --
@@ -180,18 +230,35 @@ class Broker:
         table = {
             "subscriber": {"subscribe": self._subscribe, "unsubscribe": self._unsubscribe,
                            "my_locations": self._my_locations,
-                           "view_updates": self._view_updates},
+                           "view_updates": self._view_updates, "ack": self._ack},
             "publisher": {"publish": self._publish, "published": self._published},
         }[s.role]
         handler = table.get(cmd)
         if handler is None:
-            s.send(err(f"Unknown command '{cmd}' for {s.role}"))
-            return
-        try:
-            s.send(handler(s, d))
-        except sqlite3.Error as exc:
-            log(f"DB error: {exc}")
-            s.send(err("Broker storage error"))
+            resp = err(f"Unknown command '{cmd}' for {s.role}")
+        else:
+            try:
+                resp = handler(s, d)
+            except sqlite3.Error as exc:
+                with self.lock:
+                    self.db.rollback()
+                log(f"DB error: {exc}")
+                resp = err("Broker storage error")
+        if resp is not None:
+            if "rid" in d:
+                resp["rid"] = d["rid"]   # lets the client match reply to request
+            s.send(resp)
+
+    def _ack(self, s, d):
+        mid = d.get("id")
+        if isinstance(mid, int):
+            with self.lock:
+                self.db.execute(
+                    "UPDATE deliveries SET delivered=1, delivered_at=? "
+                    "WHERE username=? AND message_id=? AND delivered=0",
+                    (now(), s.name, mid))
+                self.db.commit()
+        return None   # acks get no response
 
     def _subscribe(self, s, d):
         loc = d.get("location")
@@ -240,6 +307,12 @@ class Broker:
                   for k in ("condition", "temperature", "alert_level", "message")}
         if not all(fields.values()):
             return err("All fields are required")
+        if fields["alert_level"] not in ALERT_LEVELS:
+            return err("Invalid alert level")
+        try:
+            float(fields["temperature"])
+        except ValueError:
+            return err("Temperature must be a number")
         with self.lock:
             cur = self.db.execute(
                 "INSERT INTO messages(location,condition,temperature,alert_level,text,"
@@ -250,17 +323,14 @@ class Broker:
             row = self.db.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
             users = [r["username"] for r in self.db.execute(
                 "SELECT username FROM subscriptions WHERE location=?", (loc,))]
-            live = 0
-            for u in users:
-                self.db.execute("INSERT OR IGNORE INTO deliveries(username,message_id) "
-                                "VALUES(?,?)", (u, mid))
-                target = self.online.get(u)
-                if target and target.send(push_from_row(row)):
-                    self.db.execute("UPDATE deliveries SET delivered=1, delivered_at=? "
-                                    "WHERE username=? AND message_id=?", (now(), u, mid))
-                    live += 1
+            self.db.executemany("INSERT OR IGNORE INTO deliveries(username,message_id) "
+                                "VALUES(?,?)", [(u, mid) for u in users])
             self.db.commit()
-        log(f"Publisher '{s.name}' -> {loc}: {live}/{len(users)} delivered live, "
+            targets = [self.online[u] for u in users if u in self.online]
+        # Network sends happen outside the lock so a slow client can't stall others.
+        push = push_from_row(row)
+        live = sum(1 for t in targets if t.send(push))
+        log(f"Publisher '{s.name}' -> {loc}: {live}/{len(users)} sent live, "
             f"{len(users) - live} queued")
         return ok(message_id=mid, total=len(users), delivered=live,
                   queued=len(users) - live)
@@ -275,7 +345,8 @@ class Broker:
 def main():
     setup_console()
     p = argparse.ArgumentParser(description="WeatherCast broker")
-    p.add_argument("--host", default=HOST)
+    p.add_argument("--host", default=BIND_HOST,
+                   help="address to listen on (default 0.0.0.0 = all interfaces)")
     p.add_argument("--port", type=int, default=PORT)
     p.add_argument("--db", default="weathercast.db")
     a = p.parse_args()

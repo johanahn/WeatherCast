@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from client_base import BrokerClient
-from common import HOST, LOCATIONS, PORT, format_alert, setup_console
+from common import HOST, PORT, format_alert, setup_console
 
 LINE = "-" * 40
 BANNER = "=" * 40
@@ -34,7 +34,7 @@ def main():
     setup_console()
     p = argparse.ArgumentParser(description="WeatherCast subscriber")
     p.add_argument("--name")
-    p.add_argument("--host", default=HOST)
+    p.add_argument("--host", default=HOST, help="broker IP/hostname")
     p.add_argument("--port", type=int, default=PORT)
     a = p.parse_args()
     name = (a.name or input("Enter your username: ")).strip()
@@ -76,7 +76,7 @@ def main():
         choice = input("\nEnter choice: ").strip()
         if choice == "1":
             print("\nAvailable Locations:")
-            loc = pick_location(LOCATIONS)
+            loc = pick_location(client.locations)
             if not loc:
                 print("Invalid selection.")
                 continue

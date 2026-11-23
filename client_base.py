@@ -1,11 +1,15 @@
-"""Client-side connection with heartbeat and automatic reconnect."""
+"""Client-side connection with heartbeat, acknowledgements and automatic reconnect."""
 import queue
 import socket
 import threading
 import time
 
-from common import (HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, HOST, PORT,
-                    LineSocket)
+from common import (AUTH_TOKEN, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, HOST,
+                    LOCATIONS, PORT, LineSocket, enable_keepalive)
+
+
+class Rejected(ConnectionError):
+    """The broker answered but refused us (bad name, bad token...). Don't retry."""
 
 
 class BrokerClient:
@@ -16,8 +20,11 @@ class BrokerClient:
         self.ls = None
         self.connected = False
         self.closed = True          # True when the *user* is disconnected
+        self.locations = list(LOCATIONS)   # replaced by the broker's list on connect
         self._responses = queue.Queue()
         self._req_lock = threading.Lock()
+        self._rid = 0
+        self._seen = set()          # push ids already shown on this connection
 
     # --------------------------------------------------------- connection --
     def connect(self):
@@ -32,18 +39,25 @@ class BrokerClient:
     def _open(self):
         sock = socket.create_connection((self.host, self.port), timeout=5)
         sock.settimeout(HEARTBEAT_TIMEOUT)
+        enable_keepalive(sock)
         ls = LineSocket(sock)
         try:
-            if not ls.send({"type": "hello", "role": self.role, "name": self.name}):
+            hello = {"type": "hello", "role": self.role, "name": self.name}
+            if AUTH_TOKEN:
+                hello["token"] = AUTH_TOKEN
+            if not ls.send(hello):
                 raise ConnectionError("Could not send hello")
             ack = ls.recv()
             if ack is None:
                 raise ConnectionError("Broker closed the connection")
             if not ack.get("ok"):
-                raise ConnectionError(ack.get("error", "Rejected by broker"))
+                raise Rejected(ack.get("error", "Rejected by broker"))
         except Exception:
             ls.close()
             raise
+        if ack.get("locations"):
+            self.locations = list(ack["locations"])
+        self._seen.clear()
         self.ls, self.connected = ls, True
         threading.Thread(target=self._reader, args=(ls,), daemon=True).start()
         threading.Thread(target=self._heartbeat, args=(ls,), daemon=True).start()
@@ -65,6 +79,12 @@ class BrokerClient:
                     break
                 kind = msg.get("type")
                 if kind == "push":
+                    # Always ack so the broker can mark it delivered...
+                    ls.send({"cmd": "ack", "id": msg.get("id")})
+                    # ...but only show it once.
+                    if msg.get("id") in self._seen:
+                        continue
+                    self._seen.add(msg.get("id"))
                     self.on_push(msg)
                 elif kind == "response":
                     self._responses.put(msg)
@@ -100,6 +120,11 @@ class BrokerClient:
                                + (f" Retrieving {ack['missed']} missed alert(s)..."
                                   if ack.get("missed") else ""))
                 return
+            except Rejected as exc:
+                # The broker is reachable but refuses us: retrying won't help.
+                self.closed = True
+                self.on_status(f"Broker rejected reconnect: {exc}")
+                return
             except (OSError, ConnectionError):
                 delay = min(delay * 2, 5)
 
@@ -108,11 +133,18 @@ class BrokerClient:
         with self._req_lock:
             if not self.connected or not self.ls:
                 return {"ok": False, "error": "Not connected to broker (reconnecting...)"}
-            while not self._responses.empty():
-                self._responses.get_nowait()
-            if not self.ls.send(payload):
+            self._rid += 1
+            rid = self._rid
+            if not self.ls.send({**payload, "rid": rid}):
                 return {"ok": False, "error": "Send failed (connection lost)"}
-            try:
-                return self._responses.get(timeout=timeout)
-            except queue.Empty:
-                return {"ok": False, "error": "Broker did not respond in time"}
+            deadline = time.time() + timeout
+            while True:
+                left = deadline - time.time()
+                if left <= 0:
+                    return {"ok": False, "error": "Broker did not respond in time"}
+                try:
+                    r = self._responses.get(timeout=left)
+                except queue.Empty:
+                    return {"ok": False, "error": "Broker did not respond in time"}
+                if r.get("rid") == rid:
+                    return r      # stale replies from earlier requests are skipped
