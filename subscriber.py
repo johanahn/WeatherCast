@@ -4,10 +4,8 @@ import argparse
 import sys
 
 from client_base import BrokerClient
-from common import HOST, PORT, format_alert, setup_console
-
-LINE = "-" * 40
-BANNER = "=" * 40
+from common import (BOLD, CYAN, DIM, GREEN, HOST, PORT, RED, RESET, YELLOW,
+                    clear_screen, format_alert, print_header, setup_console)
 
 
 def choose(prompt, count):
@@ -17,17 +15,16 @@ def choose(prompt, count):
 
 def pick_location(options):
     for i, loc in enumerate(options, 1):
-        print(f"[{i}] {loc}")
+        print(f" [{i}] {loc}")
     idx = choose("\nSelect location: ", len(options))
     return options[idx - 1] if idx else None
 
 
 def show_updates(updates):
     if not updates:
-        print("No weather updates yet for your locations.")
+        print("\nNo weather updates yet for your locations.")
     for u in updates:
         print("\n" + format_alert(u))
-        print(LINE)
 
 
 def main():
@@ -40,8 +37,8 @@ def main():
     name = (a.name or input("Enter your username: ")).strip()
 
     def on_push(m):
-        print("\n\n" + format_alert(m, missed=m.get("missed", False)) + "\n" + LINE)
-        print("Enter choice: ", end="", flush=True)
+        print("\n\n" + format_alert(m, missed=m.get("missed", False)))
+        print("\nEnter choice: ", end="", flush=True)
 
     def on_status(text):
         print(f"\n*** {text}")
@@ -50,79 +47,119 @@ def main():
     try:
         ack = client.connect()
     except (OSError, ConnectionError) as exc:
-        print(f"Cannot connect to broker at {a.host}:{a.port}: {exc}")
+        print(f"{RED}Cannot connect to broker at {a.host}:{a.port}: {exc}{RESET}")
         sys.exit(1)
+
+    clear_screen()
     if ack.get("missed"):
-        print(f"\n*** You missed {ack['missed']} alert(s) while offline (shown below).")
+        print(f"{YELLOW}*** You missed {ack['missed']} alert(s) while offline.{RESET}\n")
 
     while True:
-        print(f"\n{BANNER}\n            WEATHERCAST\n   Location-Based Weather Alert System\n{BANNER}\n")
-        print(f"Welcome, {name}!\n")
+        status = f"{GREEN}● ONLINE{RESET}" if not client.closed else f"{RED}● OFFLINE{RESET}"
+        print_header("WEATHERCAST", "Location-Based Weather Alert System")
+        print(f" User: {BOLD}{name}{RESET}   Status: {status}\n")
+
         if client.closed:
-            print("You are OFFLINE.\n[1] Reconnect\n[2] Exit")
+            print(" [1] Reconnect\n"
+                  " [2] Exit")
             choice = input("\nEnter choice: ").strip()
             if choice == "1":
+                clear_screen()
                 try:
                     ack = client.connect()
-                    print(f"Reconnected. Missed alerts retrieved: {ack.get('missed', 0)}")
+                    print(f"{GREEN}Reconnected. Missed alerts: {ack.get('missed', 0)}{RESET}\n")
                 except (OSError, ConnectionError) as exc:
-                    print(f"Reconnect failed: {exc}")
+                    print(f"{RED}Reconnect failed: {exc}{RESET}\n")
             elif choice == "2":
                 break
+            else:
+                clear_screen()
+                print(f"{RED}Invalid choice.{RESET}\n")
             continue
 
-        print("[1] Subscribe to Location\n[2] Unsubscribe from Location\n"
-              "[3] View My Locations\n[4] View Weather Updates\n[5] Disconnect\n[6] Exit")
+        print(" [1] Subscribe to Location\n"
+              " [2] Unsubscribe from Location\n"
+              " [3] View My Locations\n"
+              " [4] View Weather Updates\n"
+              " [5] Clear Terminal\n"
+              " [6] Disconnect\n"
+              " [7] Exit")
         choice = input("\nEnter choice: ").strip()
+
         if choice == "1":
+            clear_screen()
+            print_header("SUBSCRIBE TO LOCATION")
             print("\nAvailable Locations:")
             loc = pick_location(client.locations)
             if not loc:
-                print("Invalid selection.")
+                clear_screen()
+                print(f"{RED}Invalid selection.{RESET}\n")
                 continue
             r = client.request({"cmd": "subscribe", "location": loc})
+            clear_screen()
             if not r["ok"]:
-                print(f"Error: {r['error']}")
+                print(f"{RED}Error: {r['error']}{RESET}\n")
             elif r.get("already"):
-                print(f"\nYou are already subscribed to {loc}.")
+                print(f"{YELLOW}You are already subscribed to {loc}.{RESET}\n")
             else:
-                print(f"\nSuccessfully subscribed to {loc}!")
+                print(f"{GREEN}Successfully subscribed to {loc}!{RESET}\n")
+
         elif choice == "2":
             r = client.request({"cmd": "my_locations"})
+            clear_screen()
             if not r["ok"]:
-                print(f"Error: {r['error']}")
+                print(f"{RED}Error: {r['error']}{RESET}\n")
             elif not r["locations"]:
-                print("\nYou have no subscriptions.")
+                print(f"{YELLOW}You have no subscriptions.{RESET}\n")
             else:
+                print_header("UNSUBSCRIBE FROM LOCATION")
                 print("\nYour Locations:")
                 loc = pick_location(r["locations"])
+                clear_screen()
                 if loc:
                     r = client.request({"cmd": "unsubscribe", "location": loc})
-                    print(f"\nUnsubscribed from {loc}." if r["ok"] else f"Error: {r['error']}")
+                    if r["ok"]:
+                        print(f"{GREEN}Unsubscribed from {loc}.{RESET}\n")
+                    else:
+                        print(f"{RED}Error: {r['error']}{RESET}\n")
                 else:
-                    print("Invalid selection.")
+                    print(f"{RED}Invalid selection.{RESET}\n")
+
         elif choice == "3":
             r = client.request({"cmd": "my_locations"})
+            clear_screen()
             if not r["ok"]:
-                print(f"Error: {r['error']}")
+                print(f"{RED}Error: {r['error']}{RESET}\n")
             else:
-                print("\nMy Locations:")
-                print("\n".join(f"  - {x}" for x in r["locations"]) or "  (none)")
+                print_header("MY SUBSCRIBED LOCATIONS")
+                locs = "\n".join(f"  • {x}" for x in r["locations"])
+                print(f"\n{locs if locs else '  (none)'}\n")
+
         elif choice == "4":
             r = client.request({"cmd": "view_updates"})
+            clear_screen()
             if r["ok"]:
-                print("\nLatest Weather Updates (up to 10):")
+                print_header("LATEST WEATHER UPDATES")
                 show_updates(r["updates"])
+                print()
             else:
-                print(f"Error: {r['error']}")
+                print(f"{RED}Error: {r['error']}{RESET}\n")
+
         elif choice == "5":
-            client.disconnect()
-            print("\nDisconnected. Alerts published now will be queued for you.")
+            clear_screen()
+
         elif choice == "6":
             client.disconnect()
+            clear_screen()
+            print(f"{YELLOW}Disconnected. Alerts published now will be queued for you.{RESET}\n")
+
+        elif choice == "7":
+            client.disconnect()
             break
+
         else:
-            print("Invalid choice.")
+            clear_screen()
+            print(f"{RED}Invalid choice.{RESET}\n")
 
 
 if __name__ == "__main__":

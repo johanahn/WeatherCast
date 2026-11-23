@@ -6,9 +6,9 @@ import sys
 import time
 
 from client_base import BrokerClient
-from common import ALERT_LEVELS, HOST, PORT, format_alert, setup_console
+from common import (ALERT_LEVELS, BOLD, GREEN, HOST, PORT, RED, RESET,
+                    clear_screen, format_alert, print_header, setup_console)
 
-BANNER = "=" * 40
 SAMPLES = [
     ("Heavy Rain", "Moderate", "Possible flooding in low-lying areas."),
     ("Thunderstorm", "High", "Avoid open areas and stay indoors."),
@@ -24,19 +24,19 @@ def choose(prompt, count):
 
 
 def pick(title, options):
-    print(f"\n{title}")
+    print(f"\n{BOLD}{title}{RESET}")
     for i, o in enumerate(options, 1):
-        print(f"[{i}] {o}")
+        print(f" [{i}] {o}")
     idx = choose("\nChoice: ", len(options))
     return options[idx - 1] if idx else None
 
 
 def report(r):
     if not r["ok"]:
-        print(f"\nPublish failed: {r['error']}")
+        print(f"\n{RED}Publish failed: {r['error']}{RESET}")
         return
-    print("\nWeather update published successfully!")
-    print(f"\nSubscribers notified now: {r['delivered']} of {r['total']}"
+    print(f"\n{GREEN}Weather update published successfully!{RESET}")
+    print(f"Subscribers notified now: {r['delivered']} of {r['total']}"
           f" ({r['queued']} offline, queued for reconnect)")
 
 
@@ -64,53 +64,73 @@ def main():
     try:
         client.connect()
     except (OSError, ConnectionError) as exc:
-        print(f"Cannot connect to broker at {a.host}:{a.port}: {exc}")
+        print(f"{RED}Cannot connect to broker at {a.host}:{a.port}: {exc}{RESET}")
         sys.exit(1)
     if a.simulate:
         simulate(client, a.simulate)
         return
 
+    clear_screen()
     while True:
-        print(f"\n{BANNER}\n       WEATHERCAST - PUBLISHER\n{BANNER}\n")
-        print("[1] Publish Weather Update\n[2] View Published Updates\n[3] Exit")
+        print_header("WEATHERCAST - PUBLISHER", f"Logged in as {a.name}")
+        print("\n [1] Publish Weather Update\n"
+              " [2] View Published Updates\n"
+              " [3] Clear Terminal\n"
+              " [4] Exit")
         choice = input("\nEnter choice: ").strip()
+
         if choice == "1":
+            clear_screen()
+            print_header("PUBLISH WEATHER UPDATE")
             loc = pick("Select Location:", client.locations)
             if not loc:
-                print("Invalid selection.")
+                print(f"{RED}Invalid selection.{RESET}\n")
                 continue
             cond = input("\nWeather Condition: ").strip()
             temp = input("Temperature (C): ").strip()
             try:
                 float(temp)
             except ValueError:
-                print("Temperature must be a number.")
+                print(f"{RED}Temperature must be a number.{RESET}\n")
                 continue
             level = pick("Alert Level:", ALERT_LEVELS)
             if not level:
-                print("Invalid selection.")
+                print(f"{RED}Invalid selection.{RESET}\n")
                 continue
-            msg = input("Weather Message: ").strip()
+            msg = input("\nWeather Message: ").strip()
             if not (cond and temp and msg):
-                print("All fields are required.")
+                print(f"{RED}All fields are required.{RESET}\n")
                 continue
             if input("\nPublish update? (Y/N): ").strip().lower() == "y":
                 report(client.request({"cmd": "publish", "location": loc, "condition": cond,
                                        "temperature": temp, "alert_level": level,
                                        "message": msg}))
+                print()
+            else:
+                clear_screen()
+
         elif choice == "2":
+            clear_screen()
+            print_header("PUBLISHED HISTORY")
             r = client.request({"cmd": "published"})
             if not r["ok"]:
-                print(f"Error: {r['error']}")
+                print(f"\n{RED}Error: {r['error']}{RESET}")
             for u in r.get("updates", []) or []:
-                print("\n" + format_alert(u) + "\n" + "-" * 40)
+                print("\n" + format_alert(u))
             if r["ok"] and not r["updates"]:
-                print("Nothing published yet.")
+                print("\nNothing published yet.")
+            print()
+
         elif choice == "3":
+            clear_screen()
+
+        elif choice == "4":
             client.disconnect()
             break
+
         else:
-            print("Invalid choice.")
+            clear_screen()
+            print(f"{RED}Invalid choice.{RESET}\n")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ import os
 import socket
 import sys
 import threading
+import os
+import sys
 
 # Where CLIENTS connect (override with --host or WEATHERCAST_HOST).
 HOST = os.environ.get("WEATHERCAST_HOST", "127.0.0.1")
@@ -100,14 +102,56 @@ def format_temperature(value) -> str:
 
 
 def format_alert(m: dict, missed: bool = False) -> str:
-    tag = "[MISSED WEATHER ALERT]" if missed else "[WEATHER ALERT]"
-    return "\n".join([
-        tag,
-        f"Location: {m['location']}",
-        f"Condition: {m['condition']}",
-        f"Temperature: {format_temperature(m['temperature'])}",
-        f"Alert Level: {m['alert_level']}",
-        f"Issued: {m['created_at']}",
-        "",
-        f"Message: {m['message']}",
-    ])
+    width = 48
+    level = m.get("alert_level", "Low")
+    badge = LEVEL_STYLES.get(level, level)
+    border_color = RED if level in ("High", "Severe") else YELLOW if level == "Moderate" else CYAN
+    tag = " MISSED WEATHER ALERT " if missed else " LIVE WEATHER ALERT "
+
+    lines = [
+        f"{border_color}┌─{BOLD}{tag}{RESET}{border_color}{'─' * (width - len(tag) - 1)}┐{RESET}",
+        f"  {BOLD}Location:{RESET}    {m['location']}",
+        f"  {BOLD}Condition:{RESET}   {m['condition']} ({format_temperature(m['temperature'])})",
+        f"  {BOLD}Alert Level:{RESET} {badge}",
+        f"  {BOLD}Issued:{RESET}      {DIM}{m['created_at']}{RESET}",
+        f"{border_color}├{'─' * width}┤{RESET}",
+        f"  {m['message']}",
+        f"{border_color}└{'─' * width}┘{RESET}",
+    ]
+    return "\n".join(lines)
+
+    # --- ANSI Colors & Styling ---
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+CYAN = "\033[96m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+ORANGE = "\033[38;5;208m"
+RED = "\033[91m"
+
+LEVEL_STYLES = {
+    "Low": f"{GREEN}● LOW{RESET}",
+    "Moderate": f"{YELLOW}▲ MODERATE{RESET}",
+    "High": f"{ORANGE}◆ HIGH{RESET}",
+    "Severe": f"{RED}{BOLD}🚨 SEVERE{RESET}",
+}
+
+
+def clear_screen():
+    """Clear the terminal viewport and scrollback buffer."""
+    if os.name == "nt":
+        os.system("cls")
+    else:
+        # \033[2J clears visible screen, \033[3J clears scrollback buffer, \033[H moves cursor to top-left
+        sys.stdout.write("\033[2J\033[3J\033[H")
+        sys.stdout.flush()
+        
+def print_header(title: str, subtitle: str = ""):
+    """Render a clean box header."""
+    width = 48
+    print(f"{CYAN}╔{'═' * width}╗{RESET}")
+    print(f"{CYAN}║{RESET}{BOLD}{title.center(width)}{RESET}{CYAN}║{RESET}")
+    if subtitle:
+        print(f"{CYAN}║{RESET}{DIM}{subtitle.center(width)}{RESET}{CYAN}║{RESET}")
+    print(f"{CYAN}╚{'═' * width}╝{RESET}")
