@@ -131,10 +131,10 @@ ORANGE = "\033[38;5;208m"
 RED = "\033[91m"
 
 LEVEL_STYLES = {
-    "Low": f"{GREEN}● LOW{RESET}",
-    "Moderate": f"{YELLOW}▲ MODERATE{RESET}",
-    "High": f"{ORANGE}◆ HIGH{RESET}",
-    "Severe": f"{RED}{BOLD}🚨 SEVERE{RESET}",
+    "Low": f"{GREEN}  LOW{RESET}",
+    "Moderate": f"{YELLOW}  MODERATE{RESET}",
+    "High": f"{ORANGE}  HIGH{RESET}",
+    "Severe": f"{RED}{BOLD}  SEVERE{RESET}",
 }
 
 
