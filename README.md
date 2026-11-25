@@ -59,10 +59,4 @@ Manual live-demo scenarios are in `docs/fault_test_plan.md`.
 
 ## References / citations
 All socket code was written by the team from the Python standard library
-documentation. **Add any external socket reference you actually used here**
-(required by the course), e.g.:
-- Python Software Foundation. `socket`: Low-level networking interface. https://docs.python.org/3/library/socket.html
-- Python Software Foundation. `sqlite3`: DB-API 2.0 interface for SQLite. https://docs.python.org/3/library/sqlite3.html
-
-## Team
-[Member names here]
+documentation. 
