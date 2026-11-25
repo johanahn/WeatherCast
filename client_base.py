@@ -24,7 +24,7 @@ class BrokerClient:
         self._responses = queue.Queue()
         self._req_lock = threading.Lock()
         self._rid = 0
-        self._seen = set()          # push ids already shown on this connection
+        self._seen = set()          # push ids already shown in this client session
 
     # --------------------------------------------------------- connection --
     def connect(self):
@@ -57,7 +57,6 @@ class BrokerClient:
             raise
         if ack.get("locations"):
             self.locations = list(ack["locations"])
-        self._seen.clear()
         self.ls, self.connected = ls, True
         threading.Thread(target=self._reader, args=(ls,), daemon=True).start()
         threading.Thread(target=self._heartbeat, args=(ls,), daemon=True).start()
@@ -68,6 +67,7 @@ class BrokerClient:
         self.connected = False
         if self.ls:
             self.ls.send({"cmd": "bye"})
+            time.sleep(0.05)  # allow pending acks and bye to flush before closing
             self.ls.close()
 
     # ------------------------------------------------------ background IO --
